@@ -1,0 +1,214 @@
+from django.shortcuts import render,redirect
+from Face_Detection.detection import FaceRecognition
+from .forms import *
+from django.contrib import messages
+
+
+faceRecognition = FaceRecognition()
+
+def home(request):
+    return render(request,'faceDetection/home.html')
+
+
+def register(request):
+    if request.method == "POST":
+        form = ResgistrationForm(request.POST or None)
+        if form.is_valid():
+            form.save()
+            print("IN HERE")
+            messages.success(request,"SuceessFully registered")
+            addFace(request.POST['face_id'])
+            redirect('home')
+        else:
+            messages.error(request,"Account registered failed")
+    else:
+        form = ResgistrationForm()
+
+    return render(request, 'faceDetection/register.html', {'form':form})
+
+def addFace(face_id):
+    face_id = face_id
+    faceRecognition.faceDetect(face_id)
+    faceRecognition.trainFace()
+    return redirect('/')
+
+def login(request):
+    face_id = faceRecognition.recognizeFace()
+    print(face_id)
+    request.session['cus_id'] = face_id
+    return redirect('chat')
+
+def Greeting(request,face_id):
+    face_id = int(face_id)
+    context ={
+        'user' : UserProfile.objects.get(face_id = face_id)
+    }
+    return render(request,'faceDetection/greeting.html',context=context)
+
+from keras.models import load_model
+import json
+import random
+import nltk
+import os
+from django.conf import settings
+nltk.download('popular')
+from nltk.stem import WordNetLemmatizer
+lemmatizer = WordNetLemmatizer()
+import pickle
+import numpy as np
+from django.http import JsonResponse
+
+app_directory = os.path.join(settings.BASE_DIR, 'Face_Detection')
+intents = json.loads(open(app_directory+'/intents.json').read())
+words = pickle.load(open(app_directory+'/texts.pkl','rb'))
+classes = pickle.load(open(app_directory+'/labels.pkl','rb'))
+model = load_model(app_directory+'/model.h5')
+
+def clean_up_sentence(sentence):
+    # tokenize the pattern - split words into array
+    sentence_words = nltk.word_tokenize(sentence)
+    # stem each word - create short form for word
+    sentence_words = [lemmatizer.lemmatize(word.lower()) for word in sentence_words]
+    return sentence_words
+
+# return bag of words array: 0 or 1 for each word in the bag that exists in the sentence
+
+def bow(sentence, words, show_details=True):
+    # tokenize the pattern
+    sentence_words = clean_up_sentence(sentence)
+    # bag of words - matrix of N words, vocabulary matrix
+    bag = [0]*len(words)  
+    for s in sentence_words:
+        for i,w in enumerate(words):
+            if w == s: 
+                # assign 1 if current word is in the vocabulary position
+                bag[i] = 1
+                if show_details:
+                    print ("found in bag: %s" % w)
+    return(np.array(bag))
+
+def predict_class(sentence, model):
+    # filter out predictions below a threshold
+    p = bow(sentence, words,show_details=False)
+    res = model.predict(np.array([p]))[0]
+    ERROR_THRESHOLD = 0.25
+    results = [[i,r] for i,r in enumerate(res) if r>ERROR_THRESHOLD]
+    # sort by strength of probability
+    results.sort(key=lambda x: x[1], reverse=True)
+    return_list = []
+    for r in results:
+        return_list.append({"intent": classes[r[0]], "probability": str(r[1])})
+    return return_list
+
+def getResponse(ints, intents_json):
+    tag = ints[0]['intent']
+    list_of_intents = intents_json['intents']
+    for i in list_of_intents:
+        if(i['tag']== tag):
+            result = random.choice(i['responses'])
+            break
+    return result
+
+def chatbot_response(msg):
+    ints = predict_class(msg, model)
+    res = getResponse(ints, intents)
+    return res
+
+def chat(request):
+    return render(request,'faceDetection/index.html')
+def get_bot_response(request):
+    userText = request.GET.get('msg')
+    return JsonResponse({'response': chatbot_response(userText)})
+def dashboard(request):
+    return render(request,'faceDetection/dashboard.html',{})
+
+def doctor_login(request):
+    if request.session.has_key('username'):
+        return redirect("faceDetection/dashboard")
+    else:
+        if request.method == 'POST':
+            username = request.POST.get('uname')
+            password =  request.POST.get('psw')
+            post = Doctor_Detail.objects.filter(username=username,password=password)
+            if post:
+                username = request.POST.get('uname')
+                request.session['username'] = username
+                a = request.session['username']
+                sess = Doctor_Detail.objects.only('id').get(username=a).id
+                request.session['doc_id']=sess
+                return redirect("faceDetection/dashboard")
+            else:
+                messages.success(request, 'Invalid Username or Password')
+    return render(request,'faceDetection/doctor_login.html',{})
+def appointment(request):
+    hospital_id = request.session['doc_id']
+    v_hr = Appointment.objects.filter(hospital_id=int(hospital_id))
+    return render(request,'faceDetection/appointment.html',{'v_hr':v_hr})
+def customer_dashboard(request):
+    return render(request,'faceDetection/customer_dashboard.html',{})
+def search_doctor(request):
+    row = Doctor_Detail.objects.all()
+    if request.POST.get('search'):
+        a = request.POST.get('search')
+        b = request.POST.get('city')
+        doctor_details = Doctor_Detail.objects.filter(specialist__startswith=a,city__startswith=b) 
+        return render(request,'faceDetection/search_doctor.html',{'doctor_details':doctor_details})
+    return render(request,'faceDetection/search_doctor.html',{'row':row})
+
+def logout(request):
+    try:
+        del request.session['doc_id']
+    except:
+     pass
+    return render(request, 'faceDetection/doctor_login.html', {})
+def customer_logout(request):
+    try:
+        del request.session['cus_id']
+    except:
+     pass
+    return render(request, 'faceDetection/doctor_login.html', {})
+def appointment(request):
+    hospital_id = request.session['doc_id']
+    v_hr = Appointment.objects.filter(hospital_id=int(hospital_id))
+    return render(request,'faceDetection/appointment.html',{'v_hr':v_hr})
+def appoint(request):
+    if request.GET.get('id'):
+        ids = request.GET.get('id')
+        cus_id = request.session['cus_id']
+        cid = UserProfile.objects.get(face_id=int(cus_id))
+        host_id = Doctor_Detail.objects.get(id=int(ids))
+        date = request.GET.get('vdate')
+        from datetime import datetime, timedelta
+        cur_date = datetime.today().strftime('%Y-%m-%d')
+        row = Appointment.objects.filter(date=date,hospital_id=int(ids),booking_status='Booked')
+        if request.method == 'POST':
+            b = request.POST.get('msg')
+            c = request.GET.get('vdate')
+            d = request.POST.get('vtime')
+            ins =  Appointment.objects.create(hospital_id=host_id,customer_id=cid,date=c,booking_time=d,
+            msg=b,booking_status='Pending')
+            if ins:
+                messages.success(request,'Appointment Booked')
+        return render(request, 'faceDetection/appoint.html', {'row':row,'cur_date':cur_date})
+    else:
+        return render(request,'faceDetection/search_doctor',{})
+def select_date(request):
+    return render(request, 'faceDetection/select_date.html', {})
+    
+def customer_appointments(request):
+    if request.session.has_key('cus_id'):
+        cus_id = request.session['cus_id']
+        appointment = Appointment.objects.filter(customer_id=cus_id)
+        return render(request,'faceDetection/customer_appointments.html',{'appointment':appointment})
+    else:
+        return render(request,'faceDetection/doctor_login.html',{})
+
+def update_status(request,pk):
+    upd = Appointment.objects.filter(id=pk).update(booking_status='Booked')
+    return redirect('appointment')
+def cancel_app(request,pk):
+    upd = Appointment.objects.filter(id=pk).update(booking_status='Cancelled')
+    return redirect('appointment')
+
+
+
